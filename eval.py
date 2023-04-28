@@ -7,11 +7,21 @@ from utils import *
 from nltk.translate.bleu_score import corpus_bleu
 import torch.nn.functional as F
 from tqdm import tqdm
+#socre evaluation packages from COCO.api
+from evalfunc.bleu.bleu import Bleu
+from evalfunc.rouge.rouge import Rouge
+from evalfunc.cider.cider import Cider
+from evalfunc.meteor.meteor import Meteor
+
+import nltk
+nltk.download('wordnet')
+from nltk.translate.meteor_score import meteor_score
+#from evalfunc.spice.spice import Spice
 
 # Parameters
 data_folder = '/content/project/data/'  # folder with data files saved by create_input_files.py
 data_name = 'coco_5_cap_per_img_5_min_word_freq'  # base name shared by data files
-checkpoint = '/content/project/data/pretrained/BEST_checkpoint_coco_5_cap_per_img_5_min_word_freq.pth.tar'  # model checkpoint
+checkpoint = '/content/BEST_checkpoint_coco_5_cap_per_img_5_min_word_freq.pth.tar'  # model checkpoint
 word_map_file = '/content/project/data/WORDMAP_coco_5_cap_per_img_5_min_word_freq.json'  # word map, ensure it's the same the data was encoded with and the model was trained with
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # sets device for model and PyTorch tensors
 cudnn.benchmark = True  # set to true only if inputs to model are fixed size; otherwise lot of computational overhead
@@ -31,9 +41,41 @@ with open(word_map_file, 'r') as j:
 rev_word_map = {v: k for k, v in word_map.items()}
 vocab_size = len(word_map)
 
+#print('word_map', word_map)
 # Normalization transform
 normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                  std=[0.229, 0.224, 0.225])
+
+# Convert index-based captions to word-based captions
+def captions_to_words(caption, idx_to_word):
+    word_captions = []
+    for wordid in caption:
+      word_captions.append(idx_to_word[wordid])
+    return word_captions
+
+# Preprocess captions
+def preprocess_caption(caption):
+    # Remove special characters and convert to lowercase
+    caption = caption.lower().strip()
+    caption = ''.join(c for c in caption if c.isalnum() or c.isspace())
+    # Tokenize into words
+    words = caption.split()
+    return words
+
+# Calculate METEOR score
+def calculate_meteor_score(ref_captions, candidate_captions, idx_to_word):
+    # Convert index-based captions to word-based captions
+    #print(ref_captions)
+    #print(candidate_captions)
+    ref_word_caps = []
+    for caps in ref_captions:
+        ref_word_caps.append(captions_to_words(caps, idx_to_word))
+    candidate_word_captions = captions_to_words(candidate_captions, idx_to_word)
+    #print(ref_word_caps)
+    #print(candidate_word_captions)
+
+    return meteor_score(ref_word_caps, candidate_word_captions)
+
 
 
 def evaluate(beam_size):
@@ -60,7 +102,6 @@ def evaluate(beam_size):
     # For each image
     for i, (image, caps, caplens, allcaps) in enumerate(
             tqdm(loader, desc="EVALUATING AT BEAM SIZE " + str(beam_size))):
-
         k = beam_size
 
         # Move to GPU device, if available
@@ -121,8 +162,12 @@ def evaluate(beam_size):
                 top_k_scores, top_k_words = scores.view(-1).topk(k, 0, True, True)  # (s)
 
             # Convert unrolled indices to actual indices of scores
-            prev_word_inds = top_k_words / vocab_size  # (s)
+            #prev_word_inds = top_k_words / vocab_size  # (s)
+            prev_word_inds = torch.div(top_k_words, vocab_size, rounding_mode='floor')
             next_word_inds = top_k_words % vocab_size  # (s)
+
+            prev_word_inds = prev_word_inds.type(torch.cuda.LongTensor)
+            next_word_inds = next_word_inds.type(torch.cuda.LongTensor)
 
             # Add new words to sequences
             seqs = torch.cat([seqs[prev_word_inds], next_word_inds.unsqueeze(1)], dim=1)  # (s, step+1)
@@ -168,12 +213,40 @@ def evaluate(beam_size):
 
         assert len(references) == len(hypotheses)
 
-    # Calculate BLEU-4 scores
-    bleu4 = corpus_bleu(references, hypotheses)
-
-    return bleu4
+    # Calculate BLEU & CIDEr & METEOR & ROUGE scores
+    scorers = [
+        (Bleu(4), ["Bleu_1", "Bleu_2", "Bleu_3", "Bleu_4"]),
+        (Cider(), "CIDEr"),
+        #(Meteor(), "METEOR"),
+        (Rouge(), "ROUGE_L")
+    ]
+    #print('references:', len(references),references)
+    #print('hypotheses:', len(hypotheses), hypotheses)
+    hypo = [[' '.join(hypo)] for hypo in [[str(x) for x in hypo] for hypo in hypotheses]]
+    ref = [[' '.join(reft) for reft in reftmp] for reftmp in [[[str(x) for x in reft] for reft in reftmp]for reftmp in references]]
+    
+    score = []
+    method = []
+    for scorer, method_i in scorers:
+        score_i, scores_i = scorer.compute_score(ref, hypo)
+        score.extend(score_i) if isinstance(score_i, list) else score.append(score_i)
+        method.extend(method_i) if isinstance(method_i, list) else method.append(method_i)
+    score_dict = dict(zip(method,  score))
+    
+    #print(ref)
+    meteor_score = 0
+    for i in range(len(hypotheses)):
+        meteor_score += calculate_meteor_score(references[i], hypotheses[i], rev_word_map)
+    #print(meteor_score)
+    score_dict['METEOR'] = meteor_score/len(hypotheses)
+    return score_dict
 
 
 if __name__ == '__main__':
     beam_size = 1
-    print("\nBLEU-4 score @ beam size of %d is %.4f." % (beam_size, evaluate(beam_size)))
+    beam_sizes = [1,3,5]
+    for beam_size in beam_sizes:
+      score_dict = evaluate(beam_size)
+      for method, score in score_dict.items():
+        #print('%s:  %.4f' % (method, score))
+        print("%s score @ beam size of %d is %.4f.\n" % (method, beam_size, score))
