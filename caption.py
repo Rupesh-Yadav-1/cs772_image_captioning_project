@@ -9,6 +9,7 @@ import skimage.transform
 import argparse
 import cv2 #from scipy.misc import imread, imresize
 from PIL import Image
+import os
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -31,6 +32,7 @@ def caption_image_beam_search(encoder, decoder, image_path, word_map, beam_size=
     # Read image and process
     #img = imread(image_path)
     img = cv2.imread(image_path)
+    #print(image_path, img)
     cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     if len(img.shape) == 2:
         img = img[:, :, np.newaxis]
@@ -153,7 +155,7 @@ def caption_image_beam_search(encoder, decoder, image_path, word_map, beam_size=
     return seq, alphas
 
 
-def visualize_att(image_path, seq, alphas, rev_word_map, smooth=True):
+def visualize_att(image_path, seq, alphas, rev_word_map, img_directory, image_name, smooth=True):
     """
     Visualizes caption with weights at every word.
 
@@ -188,12 +190,12 @@ def visualize_att(image_path, seq, alphas, rev_word_map, smooth=True):
             plt.imshow(alpha, alpha=0.8)
         plt.set_cmap(cm.Greys_r)
         plt.axis('off')
-    plt.savefig('plot.png')
+    plt.savefig(img_directory+'output/'+image_name)
     plt.show()
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Show, Attend, and Tell - Tutorial - Generate Caption')
+    parser = argparse.ArgumentParser(description='Show, Attend, and Tell - Generate Caption')
 
     parser.add_argument('--img', '-i', help='path to image')
     parser.add_argument('--model', '-m', help='path to model')
@@ -217,9 +219,18 @@ if __name__ == '__main__':
         word_map = json.load(j)
     rev_word_map = {v: k for k, v in word_map.items()}  # ix2word
 
-    # Encode, decode with attention and beam search
-    seq, alphas = caption_image_beam_search(encoder, decoder, args.img, word_map, args.beam_size)
-    alphas = torch.FloatTensor(alphas)
-
-    # Visualize caption and attention of best sequence
-    visualize_att(args.img, seq, alphas, rev_word_map, args.smooth)
+    imgs_names = []
+    for path in os.listdir(args.img):
+      # check if current path is a file
+      if os.path.isfile(os.path.join(args.img, path)):
+        imgs_names.append(path)
+    #print(imgs_names)
+    for img_name in imgs_names:
+      img_path = os.path.join(args.img, img_name)
+      #print(img_path)
+      # Encode, decode with attention and beam search
+      seq, alphas = caption_image_beam_search(encoder, decoder, img_path, word_map, args.beam_size)
+      alphas = torch.FloatTensor(alphas)
+    
+      # Visualize caption and attention of best sequence
+      visualize_att(img_path, seq, alphas, rev_word_map, args.img, img_name, args.smooth)  #args.img -> directory
